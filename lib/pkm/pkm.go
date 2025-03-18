@@ -30,6 +30,21 @@ var (
 	ErrNotAPKMFile = errors.New("pkm: not a PKM file")
 )
 
+var pkmToETC2Formats = [12]etc2.Format{
+	0x00: etc2.FormatETC1,
+	0x01: etc2.FormatETC2RGB,
+	0x02: etc2.FormatInvalid,
+	0x03: etc2.FormatETC2RGBA8,
+	0x04: etc2.FormatETC2RGBA1,
+	0x05: etc2.FormatETC2R11Unsigned,
+	0x06: etc2.FormatETC2RG11Unsigned,
+	0x07: etc2.FormatETC2R11Signed,
+	0x08: etc2.FormatETC2RG11Signed,
+	0x09: etc2.FormatETC2SRGB,
+	0x0A: etc2.FormatETC2SRGBA8,
+	0x0B: etc2.FormatETC2SRGBA1,
+}
+
 func decodeConfig(r io.Reader) (retFormat etc2.Format, retConfig image.Config, retErr error) {
 	buf := [16]byte{}
 	if _, err := io.ReadFull(r, buf[:]); err != nil {
@@ -51,8 +66,10 @@ func decodeConfig(r io.Reader) (retFormat etc2.Format, retConfig image.Config, r
 		return 0, image.Config{}, ErrNotAPKMFile
 	}
 
-	retFormat = etc2.Format(buf[7])
-	if (retFormat < 0) || (retFormat.ETCVersion() != etcVersion) {
+	if f := int(buf[7]); f < len(pkmToETC2Formats) {
+		retFormat = pkmToETC2Formats[f]
+	}
+	if retFormat.ETCVersion() != etcVersion {
 		return 0, image.Config{}, ErrNotAPKMFile
 	}
 

@@ -48,25 +48,25 @@ func (f Format) Decode(dst image.Image, src io.Reader, widthInBlocks int, height
 		}
 		f = FormatETC2RGBA1
 
-	case FormatETC2RGBA,
-		FormatETC2SRGBA:
+	case FormatETC2RGBA8,
+		FormatETC2SRGBA8:
 		if m, ok := dst.(*image.NRGBA); !ok {
 			return ErrBadImageType
 		} else {
 			dstPix, dstStride = m.Pix, m.Stride
 		}
-		f = FormatETC2RGBA
+		f = FormatETC2RGBA8
 
-	case FormatETC2UnsignedR11,
-		FormatETC2SignedR11:
+	case FormatETC2R11Unsigned,
+		FormatETC2R11Signed:
 		if m, ok := dst.(*image.Gray16); !ok {
 			return ErrBadImageType
 		} else {
 			dstPix, dstStride = m.Pix, m.Stride
 		}
 
-	case FormatETC2UnsignedRG11,
-		FormatETC2SignedRG11:
+	case FormatETC2RG11Unsigned,
+		FormatETC2RG11Signed:
 		if m, ok := dst.(*image.RGBA64); !ok {
 			return ErrBadImageType
 		} else {
@@ -106,7 +106,7 @@ func (f Format) Decode(dst image.Image, src io.Reader, widthInBlocks int, height
 				copy(rowPix[3*dstStride:], work[0x30:0x40])
 				rowPix = rowPix[16:]
 
-			case FormatETC2RGBA:
+			case FormatETC2RGBA8:
 				alphaCode := readU64BE(buf[bufI+0:])
 				colorCode := readU64BE(buf[bufI+8:])
 				bufI += 16
@@ -118,7 +118,7 @@ func (f Format) Decode(dst image.Image, src io.Reader, widthInBlocks int, height
 				copy(rowPix[3*dstStride:], work[0x30:0x40])
 				rowPix = rowPix[16:]
 
-			case FormatETC2UnsignedR11:
+			case FormatETC2R11Unsigned:
 				rCode := readU64BE(buf[bufI+0:])
 				bufI += 8
 				decode11u(&work, 0x00, rCode)
@@ -128,7 +128,7 @@ func (f Format) Decode(dst image.Image, src io.Reader, widthInBlocks int, height
 				copy(rowPix[3*dstStride:], work[0x18:0x20])
 				rowPix = rowPix[8:]
 
-			case FormatETC2SignedR11:
+			case FormatETC2R11Signed:
 				rCode := readU64BE(buf[bufI+0:])
 				bufI += 8
 				decode11s(&work, 0x00, rCode)
@@ -138,7 +138,7 @@ func (f Format) Decode(dst image.Image, src io.Reader, widthInBlocks int, height
 				copy(rowPix[3*dstStride:], work[0x18:0x20])
 				rowPix = rowPix[8:]
 
-			case FormatETC2UnsignedRG11:
+			case FormatETC2RG11Unsigned:
 				rCode := readU64BE(buf[bufI+0:])
 				gCode := readU64BE(buf[bufI+8:])
 				bufI += 16
@@ -147,7 +147,7 @@ func (f Format) Decode(dst image.Image, src io.Reader, widthInBlocks int, height
 				weaveRG11(rowPix, dstStride, &work)
 				rowPix = rowPix[32:]
 
-			case FormatETC2SignedRG11:
+			case FormatETC2RG11Signed:
 				rCode := readU64BE(buf[bufI+0:])
 				gCode := readU64BE(buf[bufI+8:])
 				bufI += 16

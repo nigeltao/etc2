@@ -48,13 +48,6 @@ const (
 
 // Format gives the "color type" specialization of the ETC family.
 //
-// A non-negative numerical int8 value matches that used in the PKM file
-// format.
-//
-// Negative values have no counterpart in the KTX or PKM file formats. They can
-// be passed to Encode (they represent a subset of a larger format; ETC1S is a
-// subset of ETC1) but are not used by Decode.
-//
 // The "RGBA" in these constants' names match those used by other ETC
 // documentation but note that it uses non-premultiplied alpha. The
 // corresponding image and color types from Go's standard library are called
@@ -62,126 +55,87 @@ const (
 //
 // Go's standard library also doesn't discriminate between what the ETC
 // documentation calls RGB and sRGB.
-type Format int8
+type Format uint8
 
 const (
-	FormatETC1S = Format(-1)
+	FormatInvalid = Format(0x00)
 
-	FormatETC1 = Format(0x00)
+	FormatETC1S = Format(0x40)
+	FormatETC1  = Format(0x80)
 
-	FormatETC2RGB   = Format(0x01)
-	FormatETC2RGBA  = Format(0x03)
-	FormatETC2RGBA1 = Format(0x04)
+	FormatETC2RGB   = Format(0xC0)
+	FormatETC2RGBA1 = Format(0xC1)
+	FormatETC2RGBA8 = Format(0xC2)
 
-	FormatETC2UnsignedR11  = Format(0x05)
-	FormatETC2UnsignedRG11 = Format(0x06)
-	FormatETC2SignedR11    = Format(0x07)
-	FormatETC2SignedRG11   = Format(0x08)
+	FormatETC2SRGB   = Format(0xC4)
+	FormatETC2SRGBA1 = Format(0xC5)
+	FormatETC2SRGBA8 = Format(0xC6)
 
-	FormatETC2SRGB   = Format(0x09)
-	FormatETC2SRGBA  = Format(0x0A)
-	FormatETC2SRGBA1 = Format(0x0B)
+	FormatETC2R11Unsigned  = Format(0xC8)
+	FormatETC2R11Signed    = Format(0xD8)
+	FormatETC2RG11Unsigned = Format(0xE8)
+	FormatETC2RG11Signed   = Format(0xF8)
+)
+
+const (
+	formatBit1BitAlpha         = Format(0x01)
+	formatBit8BitAlpha         = Format(0x02)
+	formatBitSRGBColorSpace    = Format(0x04)
+	formatBitDepth11           = Format(0x08)
+	formatBitDepth11Signed     = Format(0x10)
+	formatBitDepth11TwoChannel = Format(0x20)
+
+	formatBitsETC1S = Format(0x40)
+	formatBitsETC1  = Format(0x80)
+	formatBitsETC2  = Format(0xC0)
 )
 
 // AlphaModel returns the Format's transparency model.
 func (f Format) AlphaModel() AlphaModel {
-	switch f {
-	case FormatETC1S,
-		FormatETC1,
-		FormatETC2RGB,
-		FormatETC2SRGB,
-		FormatETC2UnsignedR11,
-		FormatETC2UnsignedRG11,
-		FormatETC2SignedR11,
-		FormatETC2SignedRG11:
-		return AlphaModelOpaque
-
-	case FormatETC2RGBA,
-		FormatETC2SRGBA:
-		return AlphaModel8Bit
-
-	case FormatETC2RGBA1,
-		FormatETC2SRGBA1:
+	switch f & (formatBit1BitAlpha | formatBit8BitAlpha) {
+	case formatBit1BitAlpha:
 		return AlphaModel1Bit
+	case formatBit8BitAlpha:
+		return AlphaModel8Bit
 	}
-
-	return 0
+	return AlphaModelOpaque
 }
 
 // BytesPerBlock returns the Format-dependent number of bytes used to encode
 // each 4×4 pixel block.
 func (f Format) BytesPerBlock() int {
-	switch f {
-	case FormatETC1S,
-		FormatETC1,
-		FormatETC2RGB,
-		FormatETC2RGBA1,
-		FormatETC2UnsignedR11,
-		FormatETC2SignedR11,
-		FormatETC2SRGB,
-		FormatETC2SRGBA1:
-		return 8
-
-	case FormatETC2RGBA,
-		FormatETC2UnsignedRG11,
-		FormatETC2SignedRG11,
-		FormatETC2SRGBA:
+	if f == FormatInvalid {
+		return 0
+	} else if 0 != (f & (formatBit8BitAlpha | formatBitDepth11TwoChannel)) {
 		return 16
 	}
-
-	return 0
+	return 8
 }
 
 // ETCVersion returns 0, 1 or 2 depending on whether the Format is invalid,
 // from ETC1 or from ETC2.
 func (f Format) ETCVersion() int {
-	switch f {
-	case FormatETC1S,
-		FormatETC1:
+	if f < formatBitsETC1S {
+		return 0
+	} else if f < formatBitsETC2 {
 		return 1
-
-	case FormatETC2RGB,
-		FormatETC2RGBA,
-		FormatETC2RGBA1,
-		FormatETC2UnsignedR11,
-		FormatETC2UnsignedRG11,
-		FormatETC2SignedR11,
-		FormatETC2SignedRG11,
-		FormatETC2SRGB,
-		FormatETC2SRGBA,
-		FormatETC2SRGBA1:
-		return 2
 	}
-
-	return 0
+	return 2
 }
 
 // ColorModel returns the Go standard library's color model that best matches
 // the Format.
 func (f Format) ColorModel() color.Model {
-	switch f {
-	case FormatETC1S,
-		FormatETC1,
-		FormatETC2RGB,
-		FormatETC2RGBA1,
-		FormatETC2SRGB,
-		FormatETC2SRGBA1:
-		return color.RGBAModel
-
-	case FormatETC2RGBA,
-		FormatETC2SRGBA:
+	if f == FormatInvalid {
+		return nil
+	} else if 0 != (f & formatBit8BitAlpha) {
 		return color.NRGBAModel
-
-	case FormatETC2UnsignedR11,
-		FormatETC2SignedR11:
-		return color.Gray16Model
-
-	case FormatETC2UnsignedRG11,
-		FormatETC2SignedRG11:
+	} else if 0 == (f & formatBitDepth11) {
+		return color.RGBAModel
+	} else if 0 != (f & formatBitDepth11TwoChannel) {
 		return color.RGBA64Model
 	}
-
-	return nil
+	return color.Gray16Model
 }
 
 // NewImage returns an image.Image, whose concrete type is one of the standard
@@ -197,58 +151,80 @@ func (f Format) NewImage(width int, height int) (SubsettableImage, error) {
 	}
 	r := image.Rect(0, 0, (width+3)&^3, (height+3)&^3)
 
-	switch f {
-	case FormatETC1S,
-		FormatETC1,
-		FormatETC2RGB,
-		FormatETC2RGBA1,
-		FormatETC2SRGB,
-		FormatETC2SRGBA1:
-		return image.NewRGBA(r), nil
-
-	case FormatETC2RGBA,
-		FormatETC2SRGBA:
+	if f == FormatInvalid {
+		return nil, ErrBadArgument
+	} else if 0 != (f & formatBit8BitAlpha) {
 		return image.NewNRGBA(r), nil
-
-	case FormatETC2UnsignedR11,
-		FormatETC2SignedR11:
-		return image.NewGray16(r), nil
-
-	case FormatETC2UnsignedRG11,
-		FormatETC2SignedRG11:
+	} else if 0 == (f & formatBitDepth11) {
+		return image.NewRGBA(r), nil
+	} else if 0 != (f & formatBitDepth11TwoChannel) {
 		return image.NewRGBA64(r), nil
 	}
-
-	return nil, ErrBadArgument
+	return image.NewGray16(r), nil
 }
 
 // OpenGLInternalFormat returns the OpenGL internalFormat enum value for f, suitable
 // for passing to the glCompressedTexImage2D function.
 func (f Format) OpenGLInternalFormat() uint32 {
 	switch f {
-	case FormatETC1S,
-		FormatETC1:
+	case FormatETC1S, FormatETC1:
 		return 0x8D64 // GL_ETC1_RGB8_OES
+
 	case FormatETC2RGB:
 		return 0x9274 // GL_COMPRESSED_RGB8_ETC2
-	case FormatETC2RGBA:
+	case FormatETC2RGBA8:
 		return 0x9278 // GL_COMPRESSED_RGBA8_ETC2_EAC
 	case FormatETC2RGBA1:
 		return 0x9276 // GL_COMPRESSED_RGB8_PUNCHTHROUGH_ALPHA1_ETC2
-	case FormatETC2UnsignedR11:
-		return 0x9270 // GL_COMPRESSED_R11_EAC
-	case FormatETC2UnsignedRG11:
-		return 0x9272 // GL_COMPRESSED_RG11_EAC
-	case FormatETC2SignedR11:
-		return 0x9271 // GL_COMPRESSED_SIGNED_R11_EAC
-	case FormatETC2SignedRG11:
-		return 0x9273 // GL_COMPRESSED_SIGNED_RG11_EAC
+
 	case FormatETC2SRGB:
 		return 0x9275 // GL_COMPRESSED_SRGB8_ETC2
-	case FormatETC2SRGBA:
+	case FormatETC2SRGBA8:
 		return 0x9279 // GL_COMPRESSED_SRGB8_ALPHA8_ETC2_EAC
 	case FormatETC2SRGBA1:
 		return 0x9277 // GL_COMPRESSED_SRGB8_PUNCHTHROUGH_ALPHA1_ETC2
+
+	case FormatETC2R11Unsigned:
+		return 0x9270 // GL_COMPRESSED_R11_EAC
+	case FormatETC2R11Signed:
+		return 0x9271 // GL_COMPRESSED_SIGNED_R11_EAC
+	case FormatETC2RG11Unsigned:
+		return 0x9272 // GL_COMPRESSED_RG11_EAC
+	case FormatETC2RG11Signed:
+		return 0x9273 // GL_COMPRESSED_SIGNED_RG11_EAC
+	}
+
+	return 0
+}
+
+// PKMFormat returns the PKM file format's enum value for f.
+func (f Format) PKMFormat() uint8 {
+	switch f {
+	case FormatETC1S, FormatETC1:
+		return 0x00
+
+	case FormatETC2RGB:
+		return 0x01
+	case FormatETC2RGBA1:
+		return 0x04
+	case FormatETC2RGBA8:
+		return 0x03
+
+	case FormatETC2SRGB:
+		return 0x09
+	case FormatETC2SRGBA1:
+		return 0x0B
+	case FormatETC2SRGBA8:
+		return 0x0A
+
+	case FormatETC2R11Unsigned:
+		return 0x05
+	case FormatETC2R11Signed:
+		return 0x07
+	case FormatETC2RG11Unsigned:
+		return 0x06
+	case FormatETC2RG11Signed:
+		return 0x08
 	}
 
 	return 0
