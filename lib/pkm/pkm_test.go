@@ -28,8 +28,18 @@ func TestDecode(tt *testing.T) {
 		"49.etc2-srgb",
 		"49.etc2-srgba1",
 		"49.etc2-srgba8",
+		"dice.80x60.etc2-rgb",
+		"dice.80x60.etc2-rgba1",
+		"dice.80x60.etc2-rgba8",
+		"lincoln.24x32.etc1",
+		"lincoln.24x32.etc2-r11u",
+		"lincoln.24x32.etc2-rgb",
 		"mona-lisa.21x32.etc1",
 		"mona-lisa.21x32.etc2-rgb",
+		"pearl-earring.54x64.etc1",
+		"pearl-earring.54x64.etc2-rgb",
+		"water-lillies.64x62.etc1",
+		"water-lillies.64x62.etc2-rgb",
 	}
 
 	for _, tc := range testCases {
