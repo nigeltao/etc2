@@ -90,6 +90,15 @@ type encoder struct {
 	buf    [encoderBufferSize]byte
 }
 
+func (e *encoder) hasTransparentPixelsWhenUsingOneBitAlpha() bool {
+	for i := range 16 {
+		if e.pixels[(4*i)+3] < 0x80 {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *encoder) calculateBlockLoss(formatIsOneBitAlpha bool) (loss int32) {
 	for x := range 4 {
 		for y := range 4 {
@@ -114,7 +123,35 @@ func (e *encoder) encodeColor(f Format) uint64 {
 
 	formatIsOneBitAlpha := f == FormatETC2RGBA1
 	if formatIsOneBitAlpha {
-		panic("TODO")
+		codeA := e.encodeRGBWithAlpha(true)
+		decodeColor(&e.work, codeA, true)
+		lossA := e.calculateBlockLoss(formatIsOneBitAlpha)
+		bestCode, bestLoss = codeA, lossA
+
+		codeT := e.encodeT(true, false)
+		decodeColor(&e.work, codeT, true)
+		lossT := e.calculateBlockLoss(formatIsOneBitAlpha)
+		if bestLoss > lossT {
+			bestCode, bestLoss = codeT, lossT
+		}
+
+		codeH := e.encodeH(true, false)
+		decodeColor(&e.work, codeH, true)
+		lossH := e.calculateBlockLoss(formatIsOneBitAlpha)
+		if bestLoss > lossH {
+			bestCode, bestLoss = codeH, lossH
+		}
+
+		if e.hasTransparentPixelsWhenUsingOneBitAlpha() {
+			return bestCode
+		}
+
+		codeB := e.encodeRGBWithAlpha(false)
+		decodeColor(&e.work, codeB, true)
+		lossB := e.calculateBlockLoss(formatIsOneBitAlpha)
+		if bestLoss > lossB {
+			bestCode, bestLoss = codeB, lossB
+		}
 
 	} else {
 		codeA := e.encodeRGBSansAlpha(reduceAverage)
@@ -179,6 +216,188 @@ func (e *encoder) encodeColor(f Format) uint64 {
 	}
 
 	return bestCode
+}
+
+func (e *encoder) encodeRGBWithAlpha(isTransparent bool) uint64 {
+	normErr := int32(0)
+	flipErr := int32(0)
+	normCode := uint64(0)
+	flipCode := uint64(0)
+
+	for flipBit := range 2 {
+		avgColors := [2][3]float64{}
+		for c := range 3 {
+			totalWeights := [2]float64{}
+
+			for x := range 4 {
+				for y := range 4 {
+					i := (4 * y) + x
+
+					alpha := int32(e.pixels[(4*i)+3])
+					weight := 1.0
+					if alpha < 0x80 {
+						weight = 0.0001
+					}
+
+					j := 0
+					if flipBit == 0 {
+						j = x >> 1
+					} else {
+						j = y >> 1
+					}
+					totalWeights[j] += weight
+					avgColors[j][c] += weight * float64(e.pixels[(4*i)+c])
+				}
+			}
+
+			avgColors[0][c] /= totalWeights[0]
+			avgColors[1][c] /= totalWeights[1]
+		}
+		avgColorQuant0 := reduceQuantize(avgColors[0], true)
+		avgColorQuant1 := reduceQuantize(avgColors[1], true)
+
+		encColor0 := [3]int32{
+			avgColorQuant0[0] >> 3,
+			avgColorQuant0[1] >> 3,
+			avgColorQuant0[2] >> 3,
+		}
+		encColor1 := [3]int32{
+			avgColorQuant1[0] >> 3,
+			avgColorQuant1[1] >> 3,
+			avgColorQuant1[2] >> 3,
+		}
+		diff := [3]int32{
+			max(-4, min(+3, encColor1[0]-encColor0[0])),
+			max(-4, min(+3, encColor1[1]-encColor0[1])),
+			max(-4, min(+3, encColor1[2]-encColor0[2])),
+		}
+		encColor1 = [3]int32{
+			encColor0[0] + diff[0],
+			encColor0[1] + diff[1],
+			encColor0[2] + diff[2],
+		}
+		avgColorQuant0 = [3]int32{
+			(encColor0[0] << 3) | (encColor0[0] >> 2),
+			(encColor0[1] << 3) | (encColor0[1] >> 2),
+			(encColor0[2] << 3) | (encColor0[2] >> 2),
+		}
+		avgColorQuant1 = [3]int32{
+			(encColor1[0] << 3) | (encColor1[0] >> 2),
+			(encColor1[1] << 3) | (encColor1[1] >> 2),
+			(encColor1[2] << 3) | (encColor1[2] >> 2),
+		}
+
+		code := 0 |
+			(uint64(encColor0[0]) << 59) |
+			(uint64(diff[0]&7) << 56) |
+			(uint64(encColor0[1]) << 51) |
+			(uint64(diff[1]&7) << 48) |
+			(uint64(encColor0[2]) << 43) |
+			(uint64(diff[2]&7) << 40)
+		if !isTransparent {
+			code |= 1 << 33
+		}
+
+		bestError := [2]int32{maxInt32, maxInt32}
+		bestTable := [2]int32{}
+		bestIndexesLSB := [16]int32{}
+		bestIndexesMSB := [16]int32{}
+
+		for table := range 8 {
+			tabError := [2]int32{}
+			pixelIndexesLSB := [16]int32{}
+			pixelIndexesMSB := [16]int32{}
+
+			for x := range 4 {
+				for y := range 4 {
+					i := (4 * y) + x
+					transparentPixel := e.pixels[(4*i)+3] < 0x80
+
+					baseCol := [3]int32{}
+					half := 0
+					if ((flipBit == 0) && (x < 2)) || ((flipBit == 1) && (y < 2)) {
+						baseCol = avgColorQuant0
+					} else {
+						half = 1
+						baseCol = avgColorQuant1
+					}
+
+					bestJ, bestErrJ := 0, maxInt32
+					for j := range 4 {
+						if (j == 1) && isTransparent {
+							continue
+						}
+						errJ := int32(0)
+						for c := range 3 {
+							mod := int32(modifiers[table][scramble[j]])
+							col := max(0, min(255, baseCol[c]+mod))
+							if (j == 2) && isTransparent {
+								col = baseCol[c]
+							}
+							errCol := col - int32(e.pixels[(4*i)+c])
+							errJ += errCol * errCol
+						}
+						if errJ < bestErrJ {
+							bestJ, bestErrJ = j, errJ
+						}
+					}
+
+					if transparentPixel {
+						bestJ, bestErrJ = 1, 0
+					}
+					tabError[half] += bestErrJ
+
+					pixelIndex := int32(scramble[bestJ])
+					pixelIndexesLSB[(4*x)+y] = pixelIndex & 1
+					pixelIndexesMSB[(4*x)+y] = pixelIndex >> 1
+				}
+			}
+
+			for half := range 2 {
+				if tabError[half] >= bestError[half] {
+					continue
+				}
+				bestError[half] = tabError[half]
+				bestTable[half] = int32(table)
+
+				for i := range 16 {
+					y := i % 4
+					x := i / 4
+					thisHalf := 0
+					if flipBit == 0 {
+						thisHalf = x >> 1
+					} else {
+						thisHalf = y >> 1
+					}
+					if half != thisHalf {
+						continue
+					}
+					bestIndexesLSB[i] = pixelIndexesLSB[i]
+					bestIndexesMSB[i] = pixelIndexesMSB[i]
+				}
+			}
+		}
+
+		code |= (uint64(bestTable[0]) << 37)
+		code |= (uint64(bestTable[1]) << 34)
+		for i := range 16 {
+			code |= uint64(bestIndexesMSB[i]) << (i + 16)
+			code |= uint64(bestIndexesLSB[i]) << (i + 0)
+		}
+
+		if flipBit == 0 {
+			normErr = bestError[0] + bestError[1]
+			normCode = code
+		} else {
+			flipErr = bestError[0] + bestError[1]
+			flipCode = code | (1 << 32)
+		}
+	}
+
+	if normErr <= flipErr {
+		return normCode
+	}
+	return flipCode
 }
 
 func (e *encoder) encodeRGBSansAlpha(reduce reduceFunc) uint64 {
