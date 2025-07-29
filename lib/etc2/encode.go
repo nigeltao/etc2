@@ -48,7 +48,9 @@ func Encode(dst io.Writer, src image.Image, f Format, options *EncodeOptions) er
 				panic("TODO")
 
 			} else if f == FormatETC2RGBA8 {
-				panic("TODO")
+				writeU64BE(e.buf[bufJ+0:], e.encodeAlpha())
+				writeU64BE(e.buf[bufJ+8:], e.encodeColor(f))
+				bufJ += 16
 
 			} else {
 				writeU64BE(e.buf[bufJ:], e.encodeColor(f))
@@ -1052,6 +1054,127 @@ func sort4BitColorsWithPixelIndexes(a *[2][3]uint8, which uint32, pixelIndexes u
 	a[1][1] = uint8(15 & (c0 >> 4))
 	a[1][2] = uint8(15 & (c0 >> 0))
 	return 0xFFFF_0000 ^ pixelIndexes
+}
+
+func (e *encoder) encodeAlpha() uint64 {
+	alphaSum := int32(0)
+	for i := range 16 {
+		a := int32(e.pixels[(4*i)+3])
+		alphaSum += a
+	}
+	alpha := (alphaSum + 8) / 16
+
+	maxDist := int32(0)
+	for i := range 16 {
+		a := int32(e.pixels[(4*i)+3])
+		d := a - alpha
+		if d < 0 {
+			d = -d
+		}
+		maxDist = max(maxDist, d)
+	}
+	approxPos := min(255, ((maxDist*255)/160)-4)
+	tableLo := max(0, approxPos-15)
+	tableHi := max(0, min(255, approxPos+15))
+
+	bestSum := maxInt32
+	bestTable := int32(0)
+	bestAlpha := int32(0)
+	prevAlpha := alpha
+
+	for table := tableLo; (table < tableHi) && (bestSum > 0); table++ {
+		tableAlpha := prevAlpha
+		tableBestSum := maxInt32
+
+		for alphaScale := int32(16); alphaScale > 0; alphaScale /= 4 {
+			alphaLo, alphaHi := int32(0), int32(0)
+			if alphaScale == 16 {
+				alphaLo = max(0, min(255, tableAlpha-(alphaScale*4)))
+				alphaHi = max(0, min(255, tableAlpha+(alphaScale*4)))
+			} else {
+				alphaLo = max(0, min(255, tableAlpha-(alphaScale*2)))
+				alphaHi = max(0, min(255, tableAlpha+(alphaScale*2)))
+			}
+			for alpha := alphaLo; alpha <= alphaHi; alpha += alphaScale {
+				sum := int32(0)
+
+			xLoop:
+				for x := range 4 {
+					for y := range 4 {
+						bestDiff := maxInt32
+						i := (4 * y) + x
+						a := int32(e.pixels[(4*i)+3])
+
+						if a > alpha {
+							for index := 7; index >= 4; index-- {
+								d1 := adjustAlpha(alpha, table, index) - a
+								d2 := d1 * d1
+								if bestDiff >= d2 {
+									bestDiff = d2
+								} else {
+									break
+								}
+							}
+						} else {
+							for index := 0; index <= 3; index++ {
+								d1 := adjustAlpha(alpha, table, index) - a
+								d2 := d1 * d1
+								if bestDiff > d2 {
+									bestDiff = d2
+								} else {
+									break
+								}
+							}
+						}
+
+						sum += bestDiff
+						if sum > bestSum {
+							break xLoop
+						}
+					}
+				}
+
+				if tableBestSum > sum {
+					tableBestSum = sum
+					tableAlpha = alpha
+				}
+				if bestSum > sum {
+					bestSum = sum
+					bestTable = table
+					bestAlpha = alpha
+				}
+			}
+		}
+	}
+
+	code := 0 |
+		(uint64(bestAlpha) << 56) |
+		(uint64(bestTable) << 48)
+
+	for i := range 16 {
+		bestIndex, bestD2 := 0, maxInt32
+		a := int32(e.pixels[(4*i)+3])
+		for index := range 8 {
+			d1 := adjustAlpha(bestAlpha, bestTable, index) - a
+			d2 := d1 * d1
+			if bestD2 > d2 {
+				bestIndex, bestD2 = index, d2
+			}
+		}
+
+		x := uint32(i & 3)
+		y := uint32(i >> 2)
+		shift := (((x ^ 3) * 4) | (y ^ 3)) * 3
+		code |= uint64(bestIndex) << shift
+	}
+
+	return code
+}
+
+func adjustAlpha(rawAlpha int32, table int32, index int) int32 {
+	multiplier := int32(table >> 4)
+	delta := multiplier * int32(alphaModifiers[table&15][index])
+	return int32(clamp[1023&(rawAlpha+delta)])
 }
 
 func writeU64BE(buf []byte, x uint64) {

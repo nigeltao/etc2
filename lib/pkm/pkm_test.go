@@ -96,8 +96,11 @@ func TestEncode(tt *testing.T) {
 		format   etc2.Format
 	}{
 		{"49", etc2.FormatETC2RGB},
+		{"49", etc2.FormatETC2RGBA8},
 		{"49", etc2.FormatETC2SRGB},
+		{"49", etc2.FormatETC2SRGBA8},
 		{"dice.80x60", etc2.FormatETC2RGB},
+		{"dice.80x60", etc2.FormatETC2RGBA8},
 		{"lincoln.24x32", etc2.FormatETC1},
 		{"lincoln.24x32", etc2.FormatETC2RGB},
 		{"mona-lisa.21x32", etc2.FormatETC1},
