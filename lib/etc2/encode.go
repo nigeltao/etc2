@@ -124,7 +124,51 @@ func (e *encoder) encodeColor(f Format) uint64 {
 		}
 	}
 
-	panic("TODO")
+	codeP := e.encodePlanar()
+	decodeColor(&e.work, codeP, false)
+	lossP := e.calculateBlockLoss(formatIsOneBitAlpha)
+	if bestLoss > lossP {
+		bestCode, bestLoss = codeP, lossP
+	}
+
+	const goHarderT, goHarderH = 1, 2
+	goHarder := 0
+
+	codeT := e.encodeT(false, false)
+	decodeColor(&e.work, codeT, false)
+	lossT := e.calculateBlockLoss(formatIsOneBitAlpha)
+	if bestLoss > lossT {
+		bestCode, bestLoss = codeT, lossT
+		goHarder = goHarderT
+	}
+
+	codeH := e.encodeH(false, false)
+	decodeColor(&e.work, codeH, false)
+	lossH := e.calculateBlockLoss(formatIsOneBitAlpha)
+	if bestLoss > lossH {
+		bestCode, bestLoss = codeH, lossH
+		goHarder = goHarderH
+	}
+
+	switch goHarder {
+	case goHarderT:
+		codeU := e.encodeT(false, true)
+		decodeColor(&e.work, codeU, false)
+		lossU := e.calculateBlockLoss(formatIsOneBitAlpha)
+		if bestLoss > lossU {
+			bestCode, bestLoss = codeU, lossU
+		}
+
+	case goHarderH:
+		codeI := e.encodeH(false, true)
+		decodeColor(&e.work, codeI, false)
+		lossI := e.calculateBlockLoss(formatIsOneBitAlpha)
+		if bestLoss > lossI {
+			bestCode, bestLoss = codeI, lossI
+		}
+	}
+
+	return bestCode
 }
 
 func (e *encoder) encodeRGBSansAlpha(reduce reduceFunc) uint64 {
@@ -339,6 +383,677 @@ func reduceQuantize(rgbAvgs [3]float64, produce5BitColor bool) (ret [3]int32) {
 	return ret
 }
 
+func (e *encoder) encodePlanar() uint64 {
+	// Use Least Squares to find the vector x that minimizes |ax - b|**2, for
+	// the Red, Green and Blue channels independently.
+	//
+	// a is a fixed 16×3 matrix, but it's more convenient to work with its
+	// transpose: z = a' is a 3×16 matrix.
+	//
+	// z[1] captures the 4-pixel-wide horizontal gradient. z[2] captures the
+	// 4-pixel-high vertical gradient. z[0] makes the three z values sum to 1.
+	//
+	// b is a 16×1 matrix holding e.pixels values.
+	//
+	// x is the 3×1 matrix [colorO[channel]; colorH[channel]; colorV[channel]].
+	//
+	// This is equivalent to solving x = inv(a' × a) × (a' × b) which breaks
+	// down as computing d = (a' × b) and we can precompute c = inv(a' × a).
+	//
+	// In summary: d = (z × b); x = (c × d).
+
+	zMatrix := [3][16]float64{{
+		+1.00, +0.75, +0.50, +0.25,
+		+0.75, +0.50, +0.25, +0.00,
+		+0.50, +0.25, +0.00, -0.25,
+		+0.25, +0.00, -0.25, -0.50,
+	}, {
+		+0.00, +0.25, +0.50, +0.75,
+		+0.00, +0.25, +0.50, +0.75,
+		+0.00, +0.25, +0.50, +0.75,
+		+0.00, +0.25, +0.50, +0.75,
+	}, {
+		+0.00, +0.00, +0.00, +0.00,
+		+0.25, +0.25, +0.25, +0.25,
+		+0.50, +0.50, +0.50, +0.50,
+		+0.75, +0.75, +0.75, +0.75,
+	}}
+	bMatrix := [16][1]float64{}
+	cMatrix := [3][3]float64{
+		{+0.2875, -0.0125, -0.0125},
+		{-0.0125, +0.4875, -0.3125},
+		{-0.0125, -0.3125, +0.4875},
+	}
+	dMatrix := [3][1]float64{}
+	xMatrix := [3][1]float64{}
+
+	colorO := [3]float64{}
+	colorH := [3]float64{}
+	colorV := [3]float64{}
+
+	for channel := range 3 {
+		for i := range 16 {
+			bMatrix[i][0] = float64(e.pixels[(4*i)+channel])
+		}
+
+		// dMatrix = zMatrix × bMatrix.
+		for a := range 3 {
+			for b := range 1 {
+				sum := float64(0)
+				for i := range 16 {
+					sum += zMatrix[a][i] * bMatrix[i][b]
+				}
+				dMatrix[a][b] = sum
+			}
+		}
+
+		// xMatrix = cMatrix × dMatrix.
+		for c := range 3 {
+			for d := range 1 {
+				sum := float64(0)
+				for i := range 3 {
+					sum += cMatrix[c][i] * dMatrix[i][d]
+				}
+				xMatrix[c][d] = sum
+			}
+		}
+
+		colorO[channel] = max(0x00, min(0xFF, xMatrix[0][0]))
+		colorH[channel] = max(0x00, min(0xFF, xMatrix[1][0]))
+		colorV[channel] = max(0x00, min(0xFF, xMatrix[2][0]))
+	}
+
+	// Quantize to 676.
+	colorOR6 := int32(((colorO[0] * 0x3F) / 0xFF) + 0.5)
+	colorOG7 := int32(((colorO[1] * 0x7F) / 0xFF) + 0.5)
+	colorOB6 := int32(((colorO[2] * 0x3F) / 0xFF) + 0.5)
+	colorHR6 := int32(((colorH[0] * 0x3F) / 0xFF) + 0.5)
+	colorHG7 := int32(((colorH[1] * 0x7F) / 0xFF) + 0.5)
+	colorHB6 := int32(((colorH[2] * 0x3F) / 0xFF) + 0.5)
+	colorVR6 := int32(((colorV[0] * 0x3F) / 0xFF) + 0.5)
+	colorVG7 := int32(((colorV[1] * 0x7F) / 0xFF) + 0.5)
+	colorVB6 := int32(((colorV[2] * 0x3F) / 0xFF) + 0.5)
+
+	// Pack using Planar mode's idiosyncratic bit pattern.
+
+	code := 0 |
+		(uint64(colorOR6) << (63 - (6 + 0))) |
+		(uint64(colorOG7&0x40) << (57 - (1 + 6))) |
+		(uint64(colorOG7&0x3F) << (55 - (6 + 0))) |
+		(uint64(colorOB6&0x20) << (49 - (1 + 5))) |
+		(uint64(colorOB6&0x18) << (45 - (2 + 3))) |
+		(uint64(colorOB6&0x07) << (42 - (3 + 0))) |
+		(uint64(colorHR6&0x3E) << (39 - (5 + 1))) |
+		(uint64(colorHR6&0x01) << (33 - (1 + 0))) |
+		(uint64(colorHG7) << (32 - 7)) |
+		(uint64(colorHB6) << (25 - 6)) |
+		(uint64(colorVR6) << (19 - 6)) |
+		(uint64(colorVG7) << (13 - 7)) |
+		(uint64(colorVB6)) |
+		(1 << 33) // Diff bit.
+
+	// Ensure diff-red does not overflow.
+	code |= (((code >> 62) & 1) ^ 1) << 63
+
+	// Ensure diff-green does not overflow.
+	code |= (((code >> 54) & 1) ^ 1) << 55
+
+	// Ensure diff-blue overflows.
+	{
+		a := (code >> 44) & 1
+		b := (code >> 43) & 1
+		c := (code >> 41) & 1
+		d := (code >> 40) & 1
+		if 0 != ((a & c) | (^a & b & c & d) | (a & b & ^c & d)) {
+			code |= 7 << 45
+		} else {
+			code |= 1 << 42
+		}
+	}
+
+	return code
+}
+
+func (e *encoder) encodeT(formatIsOneBitAlpha bool, goHarder bool) uint64 {
+	bestSwap, bestWhich, bestPixelIndexes, bestBlockLoss := uint32(0), uint32(0), uint32(0), maxInt32
+	bestCluster := (*[2][3]uint8)(nil)
+
+	if goHarder {
+		{
+			cluster00 := clusterfy(&e.pixels, 0.0)
+			convert8BitTo4Bit(&cluster00)
+			bestSwap, bestWhich, bestPixelIndexes, bestBlockLoss = e.calculateError59T(cluster00, formatIsOneBitAlpha)
+			bestCluster = &cluster00
+		}
+
+		{
+			cluster05 := clusterfy(&e.pixels, 0.5)
+			convert8BitTo4Bit(&cluster05)
+			swap05, which05, pixelIndexes05, blockLoss05 := e.calculateError59T(cluster05, formatIsOneBitAlpha)
+			if bestBlockLoss > blockLoss05 {
+				bestSwap, bestWhich, bestPixelIndexes, bestBlockLoss = swap05, which05, pixelIndexes05, blockLoss05
+				bestCluster = &cluster05
+			}
+		}
+
+		{
+			cluster10 := clusterfy(&e.pixels, 1.0)
+			convert8BitTo4Bit(&cluster10)
+			swap10, which10, pixelIndexes10, blockLoss10 := e.calculateError59T(cluster10, formatIsOneBitAlpha)
+			if bestBlockLoss > blockLoss10 {
+				bestSwap, bestWhich, bestPixelIndexes, bestBlockLoss = swap10, which10, pixelIndexes10, blockLoss10
+				bestCluster = &cluster10
+			}
+		}
+
+	} else {
+		cluster05 := clusterfy(&e.pixels, 0.5)
+		convert8BitTo4Bit(&cluster05)
+		bestSwap, bestWhich, bestPixelIndexes, _ = e.calculateError59T(cluster05, formatIsOneBitAlpha)
+		bestCluster = &cluster05
+	}
+
+	if bestSwap > 0 {
+		bestCluster[0][0], bestCluster[1][0] = bestCluster[1][0], bestCluster[0][0]
+		bestCluster[0][1], bestCluster[1][1] = bestCluster[1][1], bestCluster[0][1]
+		bestCluster[0][2], bestCluster[1][2] = bestCluster[1][2], bestCluster[0][2]
+	}
+
+	// Pack using T mode's idiosyncratic bit pattern.
+
+	code := 0 |
+		(uint64(bestCluster[0][0]&0x0C) << 57) |
+		(uint64(bestCluster[0][0]&0x03) << 56) |
+		(uint64(bestCluster[0][1]) << 52) |
+		(uint64(bestCluster[0][2]) << 48) |
+		(uint64(bestCluster[1][0]) << 44) |
+		(uint64(bestCluster[1][1]) << 40) |
+		(uint64(bestCluster[1][2]) << 36) |
+		(uint64(bestWhich&0x06) << 33) |
+		(uint64(bestWhich&0x01) << 32) |
+		uint64(bestPixelIndexes)
+	if !formatIsOneBitAlpha {
+		code |= (1 << 33) // Diff bit.
+	}
+
+	// Ensure diff-red overflows.
+	{
+		a := (code >> 60) & 1
+		b := (code >> 59) & 1
+		c := (code >> 57) & 1
+		d := (code >> 56) & 1
+		if 0 != ((a & c) | (^a & b & c & d) | (a & b & ^c & d)) {
+			code |= 7 << 61
+		} else {
+			code |= 1 << 58
+		}
+	}
+
+	return code
+}
+
+func (e *encoder) calculateError59T(rgb444 [2][3]uint8, formatIsOneBitAlpha bool) (
+	bestSwap uint32,
+	bestWhich uint32,
+	bestPixelIndexes uint32,
+	bestBlockLoss int32) {
+
+	bestBlockLoss = maxInt32
+	for swap := range 2 {
+		if swap > 0 {
+			rgb444[0][0], rgb444[1][0] = rgb444[1][0], rgb444[0][0]
+			rgb444[0][1], rgb444[1][1] = rgb444[1][1], rgb444[0][1]
+			rgb444[0][2], rgb444[1][2] = rgb444[1][2], rgb444[0][2]
+		}
+
+		colors := [4][3]uint8{{
+			rgb444[0][0] * 0x11,
+			rgb444[0][1] * 0x11,
+			rgb444[0][2] * 0x11,
+		}, {}, {
+			rgb444[1][0] * 0x11,
+			rgb444[1][1] * 0x11,
+			rgb444[1][2] * 0x11,
+		}, {}}
+
+		for which := range 8 {
+			delta := uint32(thModifiers[which])
+			colors[1][0] = clamp[(uint32(colors[2][0])+delta)&1023]
+			colors[1][1] = clamp[(uint32(colors[2][1])+delta)&1023]
+			colors[1][2] = clamp[(uint32(colors[2][2])+delta)&1023]
+			colors[3][0] = clamp[(uint32(colors[2][0])-delta)&1023]
+			colors[3][1] = clamp[(uint32(colors[2][1])-delta)&1023]
+			colors[3][2] = clamp[(uint32(colors[2][2])-delta)&1023]
+
+			pixelIndexes := uint32(0)
+			blockLoss := int32(0)
+			for i := range 16 {
+				bestJ, bestOneLoss := 0, maxInt32
+				if formatIsOneBitAlpha && (e.pixels[(4*i)+3] < 0x80) {
+					bestJ, bestOneLoss = 2, 0
+				} else {
+					for j := range 4 {
+						if formatIsOneBitAlpha && (j == 2) {
+							continue
+						}
+						delta0 := int32(e.pixels[(4*i)+0]) - int32(colors[j][0])
+						delta1 := int32(e.pixels[(4*i)+1]) - int32(colors[j][1])
+						delta2 := int32(e.pixels[(4*i)+2]) - int32(colors[j][2])
+
+						oneLoss := 0 +
+							(weightValuesI32[0] * delta0 * delta0) +
+							(weightValuesI32[1] * delta1 * delta1) +
+							(weightValuesI32[2] * delta2 * delta2)
+						if bestOneLoss > oneLoss {
+							bestJ, bestOneLoss = j, oneLoss
+						}
+					}
+				}
+
+				shift := wholeBlockShifts[i]
+				pixelIndexes |= uint32(bestJ&2) << (shift + 0x0F)
+				pixelIndexes |= uint32(bestJ&1) << (shift + 0x00)
+				blockLoss += bestOneLoss
+			}
+
+			if bestBlockLoss > blockLoss {
+				bestSwap, bestWhich, bestPixelIndexes, bestBlockLoss =
+					uint32(swap), uint32(which), pixelIndexes, blockLoss
+			}
+		}
+	}
+
+	return bestSwap, bestWhich, bestPixelIndexes, bestBlockLoss
+}
+
+func (e *encoder) encodeH(formatIsOneBitAlpha bool, goHarder bool) uint64 {
+	bestSwap, bestWhich, bestPixelIndexes, bestBlockLoss := uint32(0), uint32(0), uint32(0), maxInt32
+	bestCluster := (*[2][3]uint8)(nil)
+
+	if goHarder {
+		{
+			cluster00 := clusterfy(&e.pixels, 0.0)
+			convert8BitTo4Bit(&cluster00)
+			sort4BitColors(&cluster00)
+			bestSwap, bestWhich, bestPixelIndexes, bestBlockLoss = e.calculateError58H(cluster00, formatIsOneBitAlpha)
+			bestCluster = &cluster00
+		}
+
+		{
+			cluster05 := clusterfy(&e.pixels, 0.5)
+			convert8BitTo4Bit(&cluster05)
+			sort4BitColors(&cluster05)
+			swap05, which05, pixelIndexes05, blockLoss05 := e.calculateError58H(cluster05, formatIsOneBitAlpha)
+			if bestBlockLoss > blockLoss05 {
+				bestSwap, bestWhich, bestPixelIndexes, bestBlockLoss = swap05, which05, pixelIndexes05, blockLoss05
+				bestCluster = &cluster05
+			}
+		}
+
+		{
+			cluster10 := clusterfy(&e.pixels, 1.0)
+			convert8BitTo4Bit(&cluster10)
+			sort4BitColors(&cluster10)
+			swap10, which10, pixelIndexes10, blockLoss10 := e.calculateError58H(cluster10, formatIsOneBitAlpha)
+			if bestBlockLoss > blockLoss10 {
+				bestSwap, bestWhich, bestPixelIndexes, bestBlockLoss = swap10, which10, pixelIndexes10, blockLoss10
+				bestCluster = &cluster10
+			}
+		}
+
+	} else {
+		cluster05 := clusterfy(&e.pixels, 0.5)
+		convert8BitTo4Bit(&cluster05)
+		sort4BitColors(&cluster05)
+		bestSwap, bestWhich, bestPixelIndexes, _ = e.calculateError58H(cluster05, formatIsOneBitAlpha)
+		bestCluster = &cluster05
+	}
+
+	if bestSwap > 0 {
+		bestCluster[0][0], bestCluster[1][0] = bestCluster[1][0], bestCluster[0][0]
+		bestCluster[0][1], bestCluster[1][1] = bestCluster[1][1], bestCluster[0][1]
+		bestCluster[0][2], bestCluster[1][2] = bestCluster[1][2], bestCluster[0][2]
+	}
+
+	bestPixelIndexes = sort4BitColorsWithPixelIndexes(bestCluster, bestWhich, bestPixelIndexes)
+
+	// Pack using H mode's idiosyncratic bit pattern.
+
+	code := 0 |
+		(uint64(bestCluster[0][0]) << 59) |
+		(uint64(bestCluster[0][1]&0x0E) << 55) |
+		(uint64(bestCluster[0][1]&0x01) << 52) |
+		(uint64(bestCluster[0][2]&0x08) << 48) |
+		(uint64(bestCluster[0][2]&0x07) << 47) |
+		(uint64(bestCluster[1][0]) << 43) |
+		(uint64(bestCluster[1][1]) << 39) |
+		(uint64(bestCluster[1][2]) << 35) |
+		(uint64(bestWhich&0x04) << 32) |
+		(uint64(bestWhich&0x02) << 31) |
+		uint64(bestPixelIndexes)
+	if !formatIsOneBitAlpha {
+		code |= (1 << 33) // Diff bit.
+	}
+
+	// Ensure diff-red does not overflow.
+	code |= (((code >> 62) & 1) ^ 1) << 63
+
+	// Ensure diff-green overflows.
+	{
+		a := (code >> 52) & 1
+		b := (code >> 51) & 1
+		c := (code >> 49) & 1
+		d := (code >> 48) & 1
+		if 0 != ((a & c) | (^a & b & c & d) | (a & b & ^c & d)) {
+			code |= 7 << 53
+		} else {
+			code |= 1 << 50
+		}
+	}
+
+	return code
+}
+
+func (e *encoder) calculateError58H(rgb444 [2][3]uint8, formatIsOneBitAlpha bool) (
+	bestSwap uint32,
+	bestWhich uint32,
+	bestPixelIndexes uint32,
+	bestBlockLoss int32) {
+
+	bestBlockLoss = maxInt32
+
+	rgb444Packed := [2]uint32{
+		(uint32(rgb444[0][0]) << 8) | (uint32(rgb444[0][1]) << 4) | (uint32(rgb444[0][2])),
+		(uint32(rgb444[1][0]) << 8) | (uint32(rgb444[1][1]) << 4) | (uint32(rgb444[1][2])),
+	}
+
+	baseColors := [2][3]uint8{{
+		rgb444[0][0] * 0x11,
+		rgb444[0][1] * 0x11,
+		rgb444[0][2] * 0x11,
+	}, {
+		rgb444[1][0] * 0x11,
+		rgb444[1][1] * 0x11,
+		rgb444[1][2] * 0x11,
+	}}
+	colors := [4][3]uint8{}
+
+	for which := range 8 {
+		alphaIndex := -1
+		if formatIsOneBitAlpha {
+			alphaIndex = 2
+			if (rgb444Packed[0] >= rgb444Packed[1]) != ((which & 1) == 1) {
+				alphaIndex = 0
+			}
+		}
+
+		delta := uint32(thModifiers[which])
+		colors[0][0] = clamp[(uint32(baseColors[0][0])+delta)&1023]
+		colors[0][1] = clamp[(uint32(baseColors[0][1])+delta)&1023]
+		colors[0][2] = clamp[(uint32(baseColors[0][2])+delta)&1023]
+		colors[1][0] = clamp[(uint32(baseColors[0][0])-delta)&1023]
+		colors[1][1] = clamp[(uint32(baseColors[0][1])-delta)&1023]
+		colors[1][2] = clamp[(uint32(baseColors[0][2])-delta)&1023]
+		colors[2][0] = clamp[(uint32(baseColors[1][0])+delta)&1023]
+		colors[2][1] = clamp[(uint32(baseColors[1][1])+delta)&1023]
+		colors[2][2] = clamp[(uint32(baseColors[1][2])+delta)&1023]
+		colors[3][0] = clamp[(uint32(baseColors[1][0])-delta)&1023]
+		colors[3][1] = clamp[(uint32(baseColors[1][1])-delta)&1023]
+		colors[3][2] = clamp[(uint32(baseColors[1][2])-delta)&1023]
+
+		pixelIndexes := uint32(0)
+		blockLoss := int32(0)
+		for i := range 16 {
+			alpha := e.pixels[(4*i)+3]
+
+			bestJ, bestOneLoss := 0, maxInt32
+			for j := range 4 {
+				oneLoss := int32(0)
+
+				{
+					if !formatIsOneBitAlpha {
+						// No-op.
+					} else if (j == alphaIndex) && (alpha >= 0x80) {
+						oneLoss = 0
+						goto haveOneLoss
+					} else if (j == alphaIndex) || (alpha >= 0x80) {
+						oneLoss = maxInt32
+						goto haveOneLoss
+					}
+
+					delta0 := int32(e.pixels[(4*i)+0]) - int32(colors[j][0])
+					delta1 := int32(e.pixels[(4*i)+1]) - int32(colors[j][1])
+					delta2 := int32(e.pixels[(4*i)+2]) - int32(colors[j][2])
+
+					oneLoss = 0 +
+						(weightValuesI32[0] * delta0 * delta0) +
+						(weightValuesI32[1] * delta1 * delta1) +
+						(weightValuesI32[2] * delta2 * delta2)
+				}
+
+			haveOneLoss:
+				if bestOneLoss > oneLoss {
+					bestJ, bestOneLoss = j, oneLoss
+				}
+			}
+
+			shift := wholeBlockShifts[i]
+			pixelIndexes |= uint32(bestJ&2) << (shift + 0x0F)
+			pixelIndexes |= uint32(bestJ&1) << (shift + 0x00)
+			blockLoss += bestOneLoss
+		}
+
+		if bestBlockLoss > blockLoss {
+			bestWhich, bestPixelIndexes, bestBlockLoss =
+				uint32(which), pixelIndexes, blockLoss
+		}
+	}
+
+	return bestSwap, bestWhich, bestPixelIndexes, bestBlockLoss
+}
+
+func clusterfy(pixels *[64]byte, intensity float64) (ret [2][3]uint8) {
+	const (
+		k1OverSqrt2 = 0.70710678118654752440084436210484903928483593768847403658833986899536623923
+		k1OverSqrt3 = 0.57735026918962576450914878050195745564760175127012687601860232648397767230
+		k1OverSqrt6 = 0.40824829046386301636621401245098189866099124677611168807211542787516006290
+		k2OverSqrt6 = 0.81649658092772603273242802490196379732198249355222337614423085575032012581
+	)
+
+	changeBasisToQRS := intensity != 1
+
+	originalColors := [48]float64{} // With possible change of basis to QRS, not RGB.
+	mins := [3]float64{+512, +512, +512}
+	maxs := [3]float64{-512, -512, -512}
+
+	for i := range 16 {
+		rgb0 := float64(pixels[(4*i)+0])
+		rgb1 := float64(pixels[(4*i)+1])
+		rgb2 := float64(pixels[(4*i)+2])
+
+		qrs0 := rgb0
+		qrs1 := rgb1
+		qrs2 := rgb2
+		if changeBasisToQRS {
+			qrs0 = (+k1OverSqrt3 * rgb0) + (+k1OverSqrt3 * rgb1) + (+k1OverSqrt3 * rgb2)
+			qrs1 = (+k1OverSqrt2 * rgb0) + (-k1OverSqrt2 * rgb1)
+			qrs2 = (+k1OverSqrt6 * rgb0) + (+k1OverSqrt6 * rgb1) + (-k2OverSqrt6 * rgb2)
+		}
+
+		mins[0] = min(mins[0], qrs0)
+		mins[1] = min(mins[1], qrs1)
+		mins[2] = min(mins[2], qrs2)
+
+		maxs[0] = max(maxs[0], qrs0)
+		maxs[1] = max(maxs[1], qrs1)
+		maxs[2] = max(maxs[2], qrs2)
+
+		originalColors[(3*i)+0] = qrs0
+		originalColors[(3*i)+1] = qrs1
+		originalColors[(3*i)+2] = qrs2
+	}
+
+	maxsMinusMins := [3]float64{
+		maxs[0] - mins[0],
+		maxs[1] - mins[1],
+		maxs[2] - mins[2],
+	}
+
+	// Run a k-means iterative-refinement algorithm (with k=2), from up to 10
+	// randomly chosen starting places, to split the originalColors into two
+	// clusters. The k-means algorithm is also known as Lloyd's algorithm.
+	// Running k-means N times, with a slight perturbation on each of the N
+	// bifurcations, producing (2 ** N) clusters, is also known as the
+	// Linde–Buzo–Gray algorithm, but when N=1 here, it's simpler to describe
+	// this as k-means instead of LBG.
+
+	distortion := 512 * 512 * 3 * 16.0
+	bestDistortion, bestColors := distortion, [2][3]float64{}
+
+seedLoop:
+	for seed := range 10 {
+		currentColors := [2][3]float64{{
+			((float64(randomInt31Values[(6*seed)+0]) / 0x7FFF_FFFF) * maxsMinusMins[0]) + mins[0],
+			((float64(randomInt31Values[(6*seed)+1]) / 0x7FFF_FFFF) * maxsMinusMins[1]) + mins[1],
+			((float64(randomInt31Values[(6*seed)+2]) / 0x7FFF_FFFF) * maxsMinusMins[2]) + mins[2],
+		}, {
+			((float64(randomInt31Values[(6*seed)+3]) / 0x7FFF_FFFF) * maxsMinusMins[0]) + mins[0],
+			((float64(randomInt31Values[(6*seed)+4]) / 0x7FFF_FFFF) * maxsMinusMins[1]) + mins[1],
+			((float64(randomInt31Values[(6*seed)+5]) / 0x7FFF_FFFF) * maxsMinusMins[2]) + mins[2],
+		}}
+
+		for _ = range 10 {
+			oldDistortion := distortion
+			distortion = 0
+
+			numA, blockMask := 0, [16]uint8{}
+			for i := range 16 {
+				oc0 := originalColors[(3*i)+0]
+				oc1 := originalColors[(3*i)+1]
+				oc2 := originalColors[(3*i)+2]
+				a0 := oc0 - currentColors[0][0]
+				a1 := oc1 - currentColors[0][1]
+				a2 := oc2 - currentColors[0][2]
+				b0 := oc0 - currentColors[1][0]
+				b1 := oc1 - currentColors[1][1]
+				b2 := oc2 - currentColors[1][2]
+
+				if !changeBasisToQRS {
+					a0 = oc0 - round(currentColors[0][0])
+					a1 = oc1 - round(currentColors[0][1])
+					a2 = oc2 - round(currentColors[0][2])
+					b0 = oc0 - round(currentColors[1][0])
+					b1 = oc1 - round(currentColors[1][1])
+					b2 = oc2 - round(currentColors[1][2])
+				}
+
+				errorA := (intensity * a0 * a0) + (a1 * a1) + (a2 * a2)
+				errorB := (intensity * b0 * b0) + (b1 * b1) + (b2 * b2)
+				if errorA < errorB {
+					blockMask[i] = 0
+					distortion += errorA
+					numA++
+				} else {
+					blockMask[i] = 1
+					distortion += errorB
+				}
+			}
+
+			if bestDistortion > distortion {
+				bestDistortion, bestColors = distortion, currentColors
+			}
+
+			if (numA == 0) || (numA == 16) {
+				continue seedLoop
+			} else if distortion == 0 {
+				break seedLoop
+			} else if distortion == oldDistortion {
+				continue seedLoop
+			}
+
+			currentColors = [2][3]float64{}
+			for i, bm := range blockMask {
+				currentColors[bm][0] += originalColors[(3*i)+0]
+				currentColors[bm][1] += originalColors[(3*i)+1]
+				currentColors[bm][2] += originalColors[(3*i)+2]
+			}
+			currentColors[0][0] /= float64(numA)
+			currentColors[0][1] /= float64(numA)
+			currentColors[0][2] /= float64(numA)
+			currentColors[1][0] /= float64(16 - numA)
+			currentColors[1][1] /= float64(16 - numA)
+			currentColors[1][2] /= float64(16 - numA)
+		}
+	}
+
+	for i := range 2 {
+		qrs0 := bestColors[i][0]
+		qrs1 := bestColors[i][1]
+		qrs2 := bestColors[i][2]
+
+		rgb0 := qrs0
+		rgb1 := qrs1
+		rgb2 := qrs2
+		if changeBasisToQRS {
+			rgb0 = (+k1OverSqrt3 * qrs0) + (+k1OverSqrt2 * qrs1) + (+k1OverSqrt6 * qrs2)
+			rgb1 = (+k1OverSqrt3 * qrs0) + (-k1OverSqrt2 * qrs1) + (+k1OverSqrt6 * qrs2)
+			rgb2 = (+k1OverSqrt3 * qrs0) + (-k2OverSqrt6 * qrs2)
+		}
+
+		ret[i][0] = uint8(clamp[1023&int32(rgb0+0.5)])
+		ret[i][1] = uint8(clamp[1023&int32(rgb1+0.5)])
+		ret[i][2] = uint8(clamp[1023&int32(rgb2+0.5)])
+	}
+	return ret
+}
+
+func convert8BitTo4Bit(a *[2][3]uint8) {
+	for i := range 2 {
+		for j := range 3 {
+			a[i][j] = uint8(((uint32(a[i][j]) + 8) * 15) / 255)
+		}
+	}
+}
+
+func sort4BitColors(a *[2][3]uint8) {
+	c0 := (256 * uint32(a[0][0])) + (16 * uint32(a[0][1])) + uint32(a[0][2])
+	c1 := (256 * uint32(a[1][0])) + (16 * uint32(a[1][1])) + uint32(a[1][2])
+
+	if c0 < c1 {
+		return
+	} else if c0 > c1 {
+		c0, c1 = c1, c0
+	} else if c0 == 0 {
+		c1 = c0 + 1
+	} else {
+		c0 = c1 - 1
+	}
+
+	a[0][0] = uint8(15 & (c0 >> 8))
+	a[0][1] = uint8(15 & (c0 >> 4))
+	a[0][2] = uint8(15 & (c0 >> 0))
+	a[1][0] = uint8(15 & (c1 >> 8))
+	a[1][1] = uint8(15 & (c1 >> 4))
+	a[1][2] = uint8(15 & (c1 >> 0))
+}
+
+func sort4BitColorsWithPixelIndexes(a *[2][3]uint8, which uint32, pixelIndexes uint32) uint32 {
+	c0 := (256 * uint32(a[0][0])) + (16 * uint32(a[0][1])) + uint32(a[0][2])
+	c1 := (256 * uint32(a[1][0])) + (16 * uint32(a[1][1])) + uint32(a[1][2])
+
+	if (c0 >= c1) == ((which & 1) == 1) {
+		return pixelIndexes
+	}
+
+	a[0][0] = uint8(15 & (c1 >> 8))
+	a[0][1] = uint8(15 & (c1 >> 4))
+	a[0][2] = uint8(15 & (c1 >> 0))
+	a[1][0] = uint8(15 & (c0 >> 8))
+	a[1][1] = uint8(15 & (c0 >> 4))
+	a[1][2] = uint8(15 & (c0 >> 0))
+	return 0xFFFF_0000 ^ pixelIndexes
+}
+
 func writeU64BE(buf []byte, x uint64) {
 	buf = buf[:8]
 	buf[0] = uint8(x >> 56)
@@ -349,6 +1064,33 @@ func writeU64BE(buf []byte, x uint64) {
 	buf[5] = uint8(x >> 16)
 	buf[6] = uint8(x >> 8)
 	buf[7] = uint8(x >> 0)
+}
+
+// Debian 12 Bookworm (2023) with gcc 12.
+//
+// RAND_MAX is 0x7FFF_FFFF.
+//
+//	#include <stdio.h>
+//	#include <stdlib.h>
+//	int main(int argc, char** argv) {
+//		srand(10000);
+//		for (int i = 0; i < 64; i++) {
+//			int r = rand();
+//			printf("0x%04X_%04X,", r >> 16, r & 0xFFFF);
+//		}
+//		return 0;
+//	}
+//
+// Obligatory XKCD "Random Number" reference: https://xkcd.com/221/
+var randomInt31Values = [64]int32{
+	0x237D_6C33, 0x1E31_56EE, 0x3A5F_2C08, 0x4762_399F, 0x61A7_1336, 0x1C03_E9BD, 0x171F_1561, 0x5B60_8B64,
+	0x3715_262C, 0x1AE2_A7DA, 0x1471_C6E4, 0x05BF_AFFC, 0x109A_D212, 0x22D1_1B88, 0x57AF_DA7F, 0x7AF7_A412,
+	0x1D28_9D00, 0x3068_A7C7, 0x6384_F670, 0x2181_A9BA, 0x7144_A3E5, 0x2C14_116A, 0x1F59_A28C, 0x04BC_A8D6,
+	0x75C9_072A, 0x35DA_8117, 0x451F_0311, 0x68C5_C3DA, 0x6FE7_F216, 0x2653_16D3, 0x2872_63E0, 0x1365_5E4A,
+	0x4484_6DC2, 0x62D1_8FE8, 0x5AC7_97E9, 0x262B_80F8, 0x7ED5_79A5, 0x71E6_AD4A, 0x018C_0C5D, 0x35EA_9FD1,
+	0x0CC9_5525, 0x15FD_D341, 0x3BAA_4FCD, 0x1D64_2737, 0x38CE_EECA, 0x135A_2A4D, 0x185B_CB49, 0x55F7_8BCA,
+	0x43C2_D214, 0x7BE0_C1B9, 0x7779_3584, 0x3507_75F9, 0x27F4_D323, 0x16D2_D811, 0x39C4_1ED0, 0x1DBD_DA4E,
+	0x4CAD_5928, 0x7EE3_21E1, 0x0683_9E28, 0x3C95_4B3F, 0x2536_38B5, 0x2EF6_0208, 0x4FFA_A989, 0x69BA_A677,
 }
 
 // numOrientations counts four orientations of a 2×4 or 4×2 half-block.
@@ -373,7 +1115,21 @@ var perOrientationShifts = [numOrientations][8]uint8{
 	{0x02, 0x03, 0x06, 0x07, 0x0A, 0x0B, 0x0E, 0x0F},
 }
 
+var wholeBlockShifts = [16]uint8{
+	0x00, 0x04, 0x08, 0x0C,
+	0x01, 0x05, 0x09, 0x0D,
+	0x02, 0x06, 0x0A, 0x0E,
+	0x03, 0x07, 0x0B, 0x0F,
+}
+
 var scramble = [4]uint8{3, 2, 0, 1}
+
+func round(arg float64) float64 {
+	if arg < 0 {
+		return float64(int32(arg - 0.5))
+	}
+	return float64(int32(arg + 0.5))
+}
 
 const (
 	maxFloat64 = float64(0x1p1023 * (1 + (1 - 0x1p-52))) // 1.79769313486231570814527423731704356798070e+308

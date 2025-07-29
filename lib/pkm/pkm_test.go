@@ -95,10 +95,17 @@ func TestEncode(tt *testing.T) {
 		filename string
 		format   etc2.Format
 	}{
+		{"49", etc2.FormatETC2RGB},
+		{"49", etc2.FormatETC2SRGB},
+		{"dice.80x60", etc2.FormatETC2RGB},
 		{"lincoln.24x32", etc2.FormatETC1},
+		{"lincoln.24x32", etc2.FormatETC2RGB},
 		{"mona-lisa.21x32", etc2.FormatETC1},
+		{"mona-lisa.21x32", etc2.FormatETC2RGB},
 		{"pearl-earring.54x64", etc2.FormatETC1},
+		{"pearl-earring.54x64", etc2.FormatETC2RGB},
 		{"water-lillies.64x62", etc2.FormatETC1},
+		{"water-lillies.64x62", etc2.FormatETC2RGB},
 	}
 
 	cachedSrcImages := map[string]image.Image{}
