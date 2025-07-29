@@ -95,6 +95,10 @@ func TestEncode(tt *testing.T) {
 		filename string
 		format   etc2.Format
 	}{
+		{"36", etc2.FormatETC2R11Unsigned},
+		{"36", etc2.FormatETC2RG11Unsigned},
+		{"36", etc2.FormatETC2R11Signed},
+		{"36", etc2.FormatETC2RG11Signed},
 		{"49", etc2.FormatETC2RGB},
 		{"49", etc2.FormatETC2RGBA8},
 		{"49", etc2.FormatETC2SRGB},
@@ -103,6 +107,7 @@ func TestEncode(tt *testing.T) {
 		{"dice.80x60", etc2.FormatETC2RGBA8},
 		{"lincoln.24x32", etc2.FormatETC1},
 		{"lincoln.24x32", etc2.FormatETC2RGB},
+		{"lincoln.24x32", etc2.FormatETC2R11Unsigned},
 		{"mona-lisa.21x32", etc2.FormatETC1},
 		{"mona-lisa.21x32", etc2.FormatETC2RGB},
 		{"pearl-earring.54x64", etc2.FormatETC1},

@@ -45,7 +45,15 @@ func Encode(dst io.Writer, src image.Image, f Format, options *EncodeOptions) er
 			extract(blockX, blockY)
 
 			if (f & formatBitDepth11) != 0 {
-				panic("TODO")
+				signed := (f & formatBitDepth11Signed) != 0
+				if (f & formatBitDepth11TwoChannel) != 0 {
+					writeU64BE(e.buf[bufJ+0:], e.encode11(0x00, signed))
+					writeU64BE(e.buf[bufJ+8:], e.encode11(0x20, signed))
+					bufJ += 16
+				} else {
+					writeU64BE(e.buf[bufJ+0:], e.encode11(0x00, signed))
+					bufJ += 8
+				}
 
 			} else if f == FormatETC2RGBA8 {
 				writeU64BE(e.buf[bufJ+0:], e.encodeAlpha())
@@ -1056,6 +1064,109 @@ func sort4BitColorsWithPixelIndexes(a *[2][3]uint8, which uint32, pixelIndexes u
 	return 0xFFFF_0000 ^ pixelIndexes
 }
 
+func (e *encoder) encode11(pixOffset int, signed bool) uint64 {
+	h := encode11Helper{}
+	bestBase, bestTable, bestMult := 0, 0, 0
+	bestLoss := maxUint64
+	for base := range 256 {
+		for mult := range 16 {
+			for table := range 16 {
+				h.fill(base, mult, table, signed)
+				loss := h.calculate11BlockLoss(&e.pixels, pixOffset, bestLoss)
+				if bestLoss > loss {
+					bestLoss = loss
+					bestBase, bestTable, bestMult = base, table, mult
+				}
+			}
+		}
+	}
+	h.fill(bestBase, bestMult, bestTable, signed)
+
+	code := 0 |
+		(uint64(bestBase) << (64 - 8)) |
+		(uint64(bestMult) << (56 - 4)) |
+		(uint64(bestTable) << (52 - 4))
+
+	for i := range 16 {
+		value := 0 +
+			(uint32(e.pixels[pixOffset+(2*i)+0]) << 8) +
+			(uint32(e.pixels[pixOffset+(2*i)+1]) << 0)
+		bestJ, bestDelta2 := 0, maxUint64
+		for j, helperValue := range h {
+			delta := int64(value) - int64(helperValue)
+			delta2 := uint64(delta * delta)
+			if bestDelta2 > delta2 {
+				bestJ, bestDelta2 = j, delta2
+			}
+		}
+
+		x := uint32(i & 3)
+		y := uint32(i >> 2)
+		shift := (((x ^ 3) * 4) | (y ^ 3)) * 3
+		code |= uint64(bestJ) << shift
+	}
+
+	return code
+}
+
+type encode11Helper [8]uint16
+
+func (h *encode11Helper) calculate11BlockLoss(pixels *[64]byte, pixOffset int, bestLossSoFar uint64) (loss uint64) {
+	for i := range 16 {
+		value := 0 +
+			(uint32(pixels[pixOffset+(2*i)+0]) << 8) +
+			(uint32(pixels[pixOffset+(2*i)+1]) << 0)
+		bestDelta2 := maxUint64
+		for _, helperValue := range h {
+			delta := int64(value) - int64(helperValue)
+			delta2 := uint64(delta * delta)
+			if bestDelta2 > delta2 {
+				bestDelta2 = delta2
+			}
+		}
+		loss += bestDelta2
+		if loss >= bestLossSoFar {
+			return loss
+		}
+	}
+	return loss
+}
+
+func (h *encode11Helper) fill(rawBase int, rawMultiplier int, table int, signed bool) {
+	multiplier := max(1, 8*int32(rawMultiplier))
+
+	if signed {
+		base := 8 * max(int32(int8(rawBase)), -127)
+		for i := range h {
+			delta := multiplier * int32(alphaModifiers[table][i])
+
+			value11 := int32(max(-1023, min(1023, base+delta)))
+			value16 := int32(0)
+			if value11 >= 0 {
+				value16 = (value11 << 5) | (value11 >> 5)
+			} else {
+				value11 = -value11
+				value16 = (value11 << 5) | (value11 >> 5)
+				value16 = -value16
+			}
+			value16 += 0x8000
+
+			h[i] = uint16(value16)
+		}
+
+	} else {
+		base := (8 * int32(rawBase)) + 4
+		for i := range h {
+			delta := multiplier * int32(alphaModifiers[table][i])
+
+			value11 := uint32(max(0, min(2047, base+delta)))
+			value16 := (value11 << 5) | (value11 >> 6)
+
+			h[i] = uint16(value16)
+		}
+	}
+}
+
 func (e *encoder) encodeAlpha() uint64 {
 	alphaSum := int32(0)
 	for i := range 16 {
@@ -1257,6 +1368,7 @@ func round(arg float64) float64 {
 const (
 	maxFloat64 = float64(0x1p1023 * (1 + (1 - 0x1p-52))) // 1.79769313486231570814527423731704356798070e+308
 	maxInt32   = int32(0x7FFF_FFFF)                      // 2147483647
+	maxUint64  = uint64(0xFFFF_FFFF_FFFF_FFFF)           // 18446744073709551615
 )
 
 var (
