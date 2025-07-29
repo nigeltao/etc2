@@ -27,7 +27,9 @@ func init() {
 }
 
 var (
-	ErrNotAPKMFile = errors.New("pkm: not a PKM file")
+	ErrBadArgument     = errors.New("pkm: bad argument")
+	ErrNotAPKMFile     = errors.New("pkm: not a PKM file")
+	ErrImageIsTooLarge = errors.New("pkm: image is too large")
 )
 
 var pkmToETC2Formats = [12]etc2.Format{
@@ -111,4 +113,54 @@ func Decode(r io.Reader) (image.Image, error) {
 		return nil, err
 	}
 	return m.SubImage(image.Rect(0, 0, config.Width, config.Height)), err
+}
+
+// EncodeOptions are optional arguments to Encode. The zero value is valid and
+// means to use the default configuration.
+type EncodeOptions struct {
+	// If zero, the default is to use etc2.FormatETC2RGB.
+	Format etc2.Format
+}
+
+// Encode writes src to w in the PKM format.
+//
+// options may be nil, which means to use the default configuration.
+func Encode(w io.Writer, src image.Image, options *EncodeOptions) error {
+	b := src.Bounds()
+	bW, bH := b.Dx(), b.Dy()
+	if (bW > 65532) || (bH > 65532) {
+		return ErrImageIsTooLarge
+	}
+
+	f := etc2.FormatETC2RGB
+	if (options != nil) && (options.Format != 0) {
+		f = options.Format
+	}
+	version := f.ETCVersion()
+	if version == 0 {
+		return ErrBadArgument
+	}
+
+	buf := [16]byte{}
+	copy(buf[:4], Magic)
+	buf[0x04] = 0x30 | uint8(version)
+	buf[0x05] = 0x30
+	buf[0x06] = 0x00
+	buf[0x07] = byte(f.PKMFormat())
+
+	roundedUpW := (bW + 3) &^ 3
+	roundedUpH := (bH + 3) &^ 3
+	buf[0x08] = uint8(roundedUpW >> 8)
+	buf[0x09] = uint8(roundedUpW >> 0)
+	buf[0x0A] = uint8(roundedUpH >> 8)
+	buf[0x0B] = uint8(roundedUpH >> 0)
+	buf[0x0C] = uint8(bW >> 8)
+	buf[0x0D] = uint8(bW >> 0)
+	buf[0x0E] = uint8(bH >> 8)
+	buf[0x0F] = uint8(bH >> 0)
+	if _, err := w.Write(buf[:]); err != nil {
+		return err
+	}
+
+	return etc2.Encode(w, src, f, nil)
 }

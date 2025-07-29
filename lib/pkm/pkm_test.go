@@ -10,10 +10,13 @@ package pkm
 
 import (
 	"bytes"
+	"image"
+	"image/png"
 	"os"
 	"testing"
 
 	"github.com/nigeltao/etc2/internal/nie"
+	"github.com/nigeltao/etc2/lib/etc2"
 )
 
 func TestDecode(tt *testing.T) {
@@ -85,4 +88,107 @@ func TestDecode(tt *testing.T) {
 		tt.Errorf("tc=%q: NIE output differs at byte offset 0x%04X (%d), got vs want:\n% 02X\n% 02X",
 			tc, byteOffset, byteOffset, got[n:n+8], want[n:n+8])
 	}
+}
+
+func TestEncode(tt *testing.T) {
+	testCases := []struct {
+		filename string
+		format   etc2.Format
+	}{
+		{"lincoln.24x32", etc2.FormatETC1},
+		{"mona-lisa.21x32", etc2.FormatETC1},
+		{"pearl-earring.54x64", etc2.FormatETC1},
+		{"water-lillies.64x62", etc2.FormatETC1},
+	}
+
+	cachedSrcImages := map[string]image.Image{}
+
+	for _, tc := range testCases {
+		tcString := tc.filename + "." + formatString(tc.format)
+
+		srcImage := cachedSrcImages[tc.filename]
+		if srcImage == nil {
+			srcBytes, err := os.ReadFile("../../res/0-original-png/" + tc.filename + ".png")
+			if err != nil {
+				tt.Errorf("tc=%q: os.ReadFile(png): %v", tcString, err)
+				continue
+			}
+
+			srcImage, err = png.Decode(bytes.NewReader(srcBytes))
+			if err != nil {
+				tt.Errorf("tc=%q: Decode: %v", tcString, err)
+				continue
+			}
+
+			cachedSrcImages[tc.filename] = srcImage
+		}
+
+		buf := &bytes.Buffer{}
+		options := &EncodeOptions{
+			Format: tc.format,
+		}
+		if err := Encode(buf, srcImage, options); err != nil {
+			tt.Errorf("tc=%q: Encode: %v", tcString, err)
+			continue
+		}
+		got := buf.Bytes()
+
+		want, err := os.ReadFile("../../res/1-encoded-pkm/" + tcString + ".pkm")
+		if err != nil {
+			tt.Errorf("tc=%q: os.ReadFile(pkm): %v", tcString, err)
+			continue
+		}
+
+		if bytes.Equal(got, want) {
+			continue
+		} else if len(got) != len(want) {
+			tt.Errorf("tc=%q: lengths: got %d, want %d", tcString, len(got), len(want))
+			continue
+		}
+
+		byteOffset := 0
+		for byteOffset = range got {
+			if got[byteOffset] != want[byteOffset] {
+				break
+			}
+		}
+
+		n := byteOffset &^ 7
+		tt.Errorf("tc=%q: PKM output differs at byte offset 0x%06X (%d), got vs want:\n% 02X\n% 02X",
+			tcString, byteOffset, byteOffset, got[n:n+8], want[n:n+8])
+	}
+}
+
+func formatString(f etc2.Format) string {
+	switch f {
+	case etc2.FormatETC1:
+		return "etc1"
+	case etc2.FormatETC1S:
+		return "etc1s"
+
+	case etc2.FormatETC2RGB:
+		return "etc2-rgb"
+	case etc2.FormatETC2RGBA8:
+		return "etc2-rgba8"
+	case etc2.FormatETC2RGBA1:
+		return "etc2-rgba1"
+
+	case etc2.FormatETC2SRGB:
+		return "etc2-srgb"
+	case etc2.FormatETC2SRGBA8:
+		return "etc2-srgba8"
+	case etc2.FormatETC2SRGBA1:
+		return "etc2-srgba1"
+
+	case etc2.FormatETC2R11Unsigned:
+		return "etc2-r11u"
+	case etc2.FormatETC2RG11Unsigned:
+		return "etc2-rg11u"
+	case etc2.FormatETC2R11Signed:
+		return "etc2-r11s"
+	case etc2.FormatETC2RG11Signed:
+		return "etc2-rg11s"
+	}
+
+	return "invalid"
 }

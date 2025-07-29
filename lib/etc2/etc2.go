@@ -26,8 +26,9 @@ import (
 )
 
 var (
-	ErrBadArgument  = errors.New("etc2: bad argument")
-	ErrBadImageType = errors.New("etc2: bad image type")
+	ErrBadArgument     = errors.New("etc2: bad argument")
+	ErrBadImageType    = errors.New("etc2: bad image type")
+	ErrImageIsTooLarge = errors.New("etc2: image is too large")
 )
 
 // SubsettableImage is an image.Image that also has a SubImage method, like all
