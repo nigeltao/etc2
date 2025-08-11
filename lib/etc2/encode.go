@@ -154,12 +154,16 @@ func (e *encoder) encodeColor(f Format) uint64 {
 		}
 
 	} else {
-		codeA := e.encodeRGBSansAlpha(reduceAverage)
+		codeA := e.encodeRGBSansAlpha(reduceAverage, f == FormatETC1S)
 		decodeColor(&e.work, codeA, false)
 		lossA := e.calculateBlockLoss(formatIsOneBitAlpha)
 		bestCode, bestLoss = codeA, lossA
 
-		codeQ := e.encodeRGBSansAlpha(reduceQuantize)
+		if f == FormatETC1S {
+			return bestCode
+		}
+
+		codeQ := e.encodeRGBSansAlpha(reduceQuantize, false)
 		decodeColor(&e.work, codeQ, false)
 		lossQ := e.calculateBlockLoss(formatIsOneBitAlpha)
 		if bestLoss > lossQ {
@@ -400,14 +404,22 @@ func (e *encoder) encodeRGBWithAlpha(isTransparent bool) uint64 {
 	return flipCode
 }
 
-func (e *encoder) encodeRGBSansAlpha(reduce reduceFunc) uint64 {
+func (e *encoder) encodeRGBSansAlpha(reduce reduceFunc, formatIsETC1S bool) uint64 {
 	bestCode, bestLoss := uint64(0), maxInt32
 	for flipBit := range 2 {
 		rgbAvgs0 := e.calculateRGBAverages((2 * flipBit) + 0)
 		rgbAvgs1 := e.calculateRGBAverages((2 * flipBit) + 1)
 
-		base0 := reduce(rgbAvgs0, true)
-		base1 := reduce(rgbAvgs1, true)
+		base0, base1 := [3]int32{}, [3]int32{}
+		if !formatIsETC1S {
+			base0 = reduce(rgbAvgs0, true)
+			base1 = reduce(rgbAvgs1, true)
+		} else if flipBit == 0 {
+			base0 = reduceETC1SProduce5BitColor(rgbAvgs0, rgbAvgs1)
+			base1 = base0
+		} else {
+			break
+		}
 
 		diff0 := (base1[0] >> 3) - (base0[0] >> 3)
 		diff1 := (base1[1] >> 3) - (base0[1] >> 3)
@@ -524,6 +536,20 @@ func (e *encoder) encodeHalfBlock1(orientation int, base *[3]int32, table uint32
 		loss += bestOneLoss
 	}
 	return indexes, loss
+}
+
+func reduceETC1SProduce5BitColor(rgbAvgs0 [3]float64, rgbAvgs1 [3]float64) [3]int32 {
+	rgbAvgs0[0] = (rgbAvgs0[0] + rgbAvgs1[0]) / 2
+	rgbAvgs0[1] = (rgbAvgs0[1] + rgbAvgs1[1]) / 2
+	rgbAvgs0[2] = (rgbAvgs0[2] + rgbAvgs1[2]) / 2
+	r := int32(((rgbAvgs0[0] * 31) / 255) + 0.5)
+	g := int32(((rgbAvgs0[1] * 31) / 255) + 0.5)
+	b := int32(((rgbAvgs0[2] * 31) / 255) + 0.5)
+	return [3]int32{
+		(r << 3) | (r >> 2),
+		(g << 3) | (g >> 2),
+		(b << 3) | (b >> 2),
+	}
 }
 
 type reduceFunc func(rgbAvgs [3]float64, produce5BitColor bool) [3]int32
